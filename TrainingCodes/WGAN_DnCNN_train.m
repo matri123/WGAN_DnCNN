@@ -1,5 +1,5 @@
 function [net, state] = WGAN_DnCNN_train(Gnet, Dnet, imdb, varargin)
-
+addpath('./data/utilities');
 %    The function automatically restarts after each training epoch by
 %    checkpointing.
 %
@@ -52,7 +52,7 @@ opts.TestErrorFile='';
 %%%-------------------------------------------------------------------------
 
 opts.batchSize = 128 ;
-opts.gpus = [];
+opts.gpus = [1];
 opts.numEpochs = 200 ;
 opts.modelName   = 'model';
 opts.expDir = fullfile('data',opts.modelName) ;
@@ -75,7 +75,7 @@ if ~exist(opts.expDir, 'dir'), mkdir(opts.expDir) ; end
 Gnet = vl_simplenn_tidy(Gnet);    %%% fill in some eventually missing values
 Dnet = vl_simplenn_tidy(Dnet);
 Gnet.layers{end-1}.precious = 1;
-vl_simplenn_display(Gnet, 'batchSize', opts.batchSize) ;
+% vl_simplenn_display(Gnet, 'batchSize', opts.batchSize) ;
 
 state.getBatch = getBatch ;
 
@@ -84,11 +84,13 @@ state.getBatch = getBatch ;
 %%%-------------------------------------------------------------------------
 
 modelPath = @(ep) fullfile(opts.expDir, sprintf([opts.modelName,'-epoch-%d.mat'], ep));
+DmodelPath = @(ep) fullfile(opts.expDir, sprintf([opts.modelName,'D-epoch-%d.mat'], ep));
 
 start = findLastCheckpoint(opts.expDir,opts.modelName) ;
 if start >= 1
     fprintf('%s: resuming by loading epoch %d', mfilename, start) ;
-    load(modelPath(start), 'net') ;
+    load(modelPath(start), 'Gnet') ;
+    load(modelPath(start), 'Dnet') ;
     % net = vl_simplenn_tidy(net) ;
 end
 
@@ -101,24 +103,34 @@ else
 end
 
 TrainError=[];
+
 for epoch = start+1 : opts.numEpochs 
     %%% Train for one epoch.
     state.epoch = epoch ;
     state.learningRate = opts.learningRate(min(epoch, numel(opts.learningRate)));
     state.train = opts.train(randperm(numel(opts.train))) ; %%% shuffle
     state.test  = opts.test; %%% no need to shuffle
+    disp(size(state.test));
     opts.thetaCurrent = opts.theta(min(epoch, numel(opts.theta)));
     if numel(opts.gpus) == 1
-        net = vl_simplenn_move(net, 'gpu') ;
+        Gnet = vl_simplenn_move(Gnet, 'gpu') ;
+        Dnet = vl_simplenn_move(Dnet, 'gpu');
     end
     
 
     subset = state.train ;
     num = 0 ;
     res = [];
-    for t = 1 : opts.batchSize : numel(subset) 
+    
+    batchStartTest = epoch;
+    batchEndTest = min(epoch + opts.batchSize, numel(subset));
+    batchTest = subset(batchStartTest : 1: batchEndTest);
+    [blurTest, sharpTest] = state.getBatch(imdb, batchTest) ;
+    
+    for t = 1 : opts.batchSize : numel(subset);
     %for t=1:opts.batchSize:opts.batchSize*5
         %%% get this image batch
+        disp(strcat(num2str(epoch),'+', num2str(t)));
         batchStart = t;
         batchEnd = min(t + opts.batchSize - 1, numel(subset));
         batch = subset(batchStart : 1: batchEnd);
@@ -126,27 +138,46 @@ for epoch = start+1 : opts.numEpochs
         if numel(batch) == 0, continue ; end
         
         [blur, sharp] = state.getBatch(imdb, batch) ;
+        if numel(opts.gpus) == 1
+            blur = gpuArray(blur);
+            sharp = gpuArray(sharp);
+        end
         % 1. G genarat deblur
         deblur = Ggenarate(Gnet, blur);
+%         imshow(cat(2, im2uint8(blur(:,:,:,1)), im2uint8(deblur(:,:,:,1))));
 
         % 2. train D
         Dnet = trainD(Dnet, sharp, deblur, opts, state, opts.batchSize);
 
         % 3. train G
-        [Gnet, state, TrainError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'train');
-        [Gnet,  ~  ,TestError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'test' );
-
+        Gnet = trainG(Gnet, Dnet, blur, opts, state, opts.batchSize);
+%         [Gnet, state, TrainError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'train');
+%         [Gnet,  ~  ,TestError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'test' );
+    end
 
     
     %plot the error figure
+    if numel(opts.gpus) == 1
+        blurTest = gpuArray(blurTest);
+        sharpTest = gpuArray(sharpTest);
+    end
+    res = vl_simplenn(Gnet, blurTest, [], [], 'conserveMemory', true, 'mode', 'test');
+    deblurTest = blurTest - res(end).x;
+    sumTest = 0;
+    for i = 1 : size(blurTest, 4)
+        [psnr, aaa] = Cal_PSNRSSIM(deblurTest(:,:,:,1), sharpTest(:,:,:,1), 0, 0);
+        sumTest = sumTest + psnr;
+    end
+    sumTest = sumTest / size(blurTest, 4);
+    TestError(epoch) = gather(sumTest);
     
     figure(1);clf;
-    hold on;
-    subplot(1,2,1);
-    plot(start+1:epoch,TrainError(start+1:epoch));
-    title('Training Error(all batch)')
-    xlabel('epoch');
-    ylabel('error');
+%     hold on;
+%     subplot(1,2,1);
+%     plot(start+1:epoch,TrainError(start+1:epoch));
+%     title('Training Error(all batch)')
+%     xlabel('epoch');
+%     ylabel('error');
     
     hold on;
     subplot(1,2,2);
@@ -157,43 +188,63 @@ for epoch = start+1 : opts.numEpochs
     
     drawnow;
     
-    net = vl_simplenn_move(net, 'cpu');
+    Gnet = vl_simplenn_move(Gnet, 'cpu');
+    Dnet = vl_simplenn_move(Dnet, 'cpu');
     %%% save current model
     disp(strcat('saving model of epoch :',num2str(epoch),'......'));
-    save(modelPath(epoch), 'net')
+    save(modelPath(epoch), 'Gnet');
+    save(DmodelPath(epoch), 'Dnet')
     save('TestError.mat','TestError');
     disp('success')
     
+end
 end
 
 %%%-------------------------------------------------------------------------
 function [deblur] = Ggenarate(net, blur)
 %%%-------------------------------------------------------------------------
-    for i = 1 : numel(blur)
-        res = vl_simplenn(net, blur[i], [], [], 'conserveMemory', true, 'mode', 'test');
-        deblur(i) = blur(i) - res{end}.x;
-    end
+%     deblur = [];
+%     disp(size(blur));
+%     disp(size(blur(:,:,:,1)));
+%     whos net;
+%     whos blur;
+    res = vl_simplenn(net, blur, [], [], 'conserveMemory', true, 'mode', 'test');
+    deblur = blur - res(end).x;
+% deblur = blur;
 end
 
 %%%-------------------------------------------------------------------------
 function [Dnet] = trainD(Dnet, sharp, deblur, opts, state, batchSize)
 %%%-------------------------------------------------------------------------
-    inputs = []
-    labels = []
-    for i = 1 : numel(sharp)
-        inputs(i) = sharp(i);
-        labels(i) = 1;
+    inputs = [];
+    labels = [];
+    if numel(opts.gpus) == 1
+        sharp1 = gather(sharp);
+        deblur1 = gather(deblur);
     end
-    for i = 1 : numel(deblur)
-        inputs(numel(sharp) + i) = deblur(i);
-        labels(numel(sharp) + i) = 0;
+    for i = 1 : size(sharp1, 4)
+        inputs(:,:,:,2 * i - 1) = sharp1(:,:,:,i);
+        labels(2 * i - 1) = 1;
+        inputs(:,:,:,2 * i) = deblur1(:,:,:,i);
+        labels(2 * i) = 0;
     end
-    randp = randperm(numel(sharp) + numel(deblur));
-    inputs = inputs(randp);
-    labels = labels(randp);
-
+%     for i = 1 : size(deblur1, 4)
+%         inputs(:,:,:,size(sharp1, 4) + i) = deblur1(:,:,:,i);
+%         labels(size(sharp1, 4) + i) = 0;
+%     end
+%     randp = randperm(numel(sharp) + numel(deblur));
+%     inputs = inputs(randp);
+%     labels = labels(randp);
+    if numel(opts.gpus) == 1
+        inputs = single(inputs);
+        labels = single(labels);
+        inputs = gpuArray(inputs);
+        labels = gpuArray(labels);
+    end
+    dzdy = [];
+    res = [];
     Dnet.layers{end}.class = labels;
-    res = vl_simplenn(Dnet, inputs, dzdy, res, ...
+    res = vl_simplenn(Dnet, inputs, [], [], ...
         'mode', 'normal', ...
         'conserveMemory', opts.conserveMemory, ...
         'backPropDepth', opts.backPropDepth, ...
@@ -211,16 +262,21 @@ end
 function [Gnet] = trainG(Gnet, Dnet, blur, opts, state, batchSize)
 %%%-------------------------------------------------------------------------
     netContainer.layers = {};
-    for i = 1 : numel(Gnet) 
+    for i = 1 : numel(Gnet.layers) 
         netContainer.layers{end + 1} = Gnet.layers{i};
     end
-    for i = 1 : numel(Dnet)
+    for i = 1 : numel(Dnet.layers)
         netContainer.layers{end + 1} = Dnet.layers{i};
     end
 
+    res = [];
     labels = ones(numel(blur), 1);
     netContainer.layers{end}.class = labels;
-    res = vl_simplenn(netContainer, blur, dzdy, res, ...
+%     vl_simplenn_display(netContainer);
+    if numel(opts.gpus) == 1
+        netContainer = vl_simplenn_move(netContainer, 'gpu');
+    end
+    res = vl_simplenn(netContainer, blur, [], res, ...
         'mode', 'normal', ...
         'conserveMemory', opts.conserveMemory, ...
         'backPropDepth', opts.backPropDepth, ...
@@ -228,8 +284,11 @@ function [Gnet] = trainG(Gnet, Dnet, blur, opts, state, batchSize)
     for l = numel(Gnet.layers) : -1 : 1
         for j = 1 : numel(res(l).dzdw)
             thisLR = state.learningRate * net.layers{l}.learningRate(j);
-            net.layers{l},weights{j} = net.layers{l}.weights{j} - thisLR * (1 / batchSize) * (res(l).dzdw{j});
+            net.layers{l}.weights{j} = net.layers{l}.weights{j} - thisLR * (1 / batchSize) * (res(l).dzdw{j});
         end
+    end
+    for i = 1 : numel(Gnet.layers)
+        Gnet.layers{i} = netContainer.layers{i};
     end
 end
 
@@ -263,9 +322,7 @@ if strcmp(mode,'train')
             end
             
     end
-    
 end
-
 
 subset = state.(mode) ;
 num = 0 ;
@@ -317,6 +374,7 @@ for t=1:opts.batchSize:numel(subset)
         fix((t-1)/opts.batchSize)+1, ceil(numel(subset)/opts.batchSize)) ;
     fprintf('error: %f \n', lossL2) ;
     
+end
 end
 
 
@@ -389,8 +447,8 @@ switch opts.solver
                 end
             end
         end
+    end
 end
-
 
 %%%-------------------------------------------------------------------------
 function epoch = findLastCheckpoint(modelDir,modelName)
@@ -399,23 +457,26 @@ list = dir(fullfile(modelDir, [modelName,'-epoch-*.mat'])) ;
 tokens = regexp({list.name}, [modelName,'-epoch-([\d]+).mat'], 'tokens') ;
 epoch = cellfun(@(x) sscanf(x{1}{1}, '%d'), tokens) ;
 epoch = max([epoch 0]) ;
+end
 
 %%%-------------------------------------------------------------------------
 function A = gradientClipping(A, theta)
 %%%-------------------------------------------------------------------------
 A(A>theta)  = theta;
 A(A<-theta) = -theta;
+end
 
 %%%-------------------------------------------------------------------------
 function fn = getBatch
 %%%-------------------------------------------------------------------------
 fn = @(x,y) getSimpleNNBatch(x,y);
+end
 
 %%%-------------------------------------------------------------------------
 function [inputs,labels] = getSimpleNNBatch(imdb, batch)
 %%%-------------------------------------------------------------------------
 inputs = imdb.inputs(:,:,:,batch);
 labels = imdb.labels(:,:,:,batch);
-
+end
 
 

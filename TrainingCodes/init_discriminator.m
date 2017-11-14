@@ -42,13 +42,13 @@ net.layers{end + 1} = initReLU(negval);
 %4
 net.layers{end + 1} = initConvolution(filtsize, 256, 256, 4, 2);
 net.layers{end + 1} = initReLU(negval);
-net.layers{end + 1} = initConvolution(filtsize, 256, 512, 1, 2);
-net.layers{end + 1} = initReLU(negval);
-
-%1
-net.layers{end + 1} = initConvolution(4, 512, 512, 4, 0);
-net.layers{end + 1} = initReLU(negval);
-net.layers{end + 1} = initConvolution(1, 512, 1, 1, 0);
+% net.layers{end + 1} = initConvolution(filtsize, 256, 512, 1, 2);
+% net.layers{end + 1} = initReLU(negval);
+% 
+% %1
+% net.layers{end + 1} = initConvolution(4, 512, 512, 4, 0);
+% net.layers{end + 1} = initReLU(negval);
+net.layers{end + 1} = initConvolution(1, 256, 1, 1, 0);
 net.layers{end + 1} = struct('type', 'sigmoid');
 end
 

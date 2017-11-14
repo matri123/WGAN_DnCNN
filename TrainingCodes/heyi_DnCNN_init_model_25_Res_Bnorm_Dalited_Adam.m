@@ -93,7 +93,7 @@ net.layers{end+1} = struct('type', 'conv', ...
 
 
 % add the loss layer                 
-net.layers{end+1} = struct('type', 'loss','loss','l2') ;
+% net.layers{end+1} = struct('type', 'loss','loss','l2') ;
 
 % add BNorm layers
 net = insertBnorm(net, 3) ;
