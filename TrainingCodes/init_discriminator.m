@@ -50,6 +50,7 @@ net.layers{end + 1} = initReLU(negval);
 % net.layers{end + 1} = initReLU(negval);
 net.layers{end + 1} = initConvolution(1, 256, 1, 1, 0);
 net.layers{end + 1} = struct('type', 'sigmoid');
+net.layers{end + 1} = struct('type', 'loss', 'loss', 'dloss');
 end
 
 function net = initConvolution(filtsize, instates, nStates, str, pad)

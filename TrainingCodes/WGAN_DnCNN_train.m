@@ -127,7 +127,7 @@ for epoch = start+1 : opts.numEpochs
     batchTest = subset(batchStartTest : 1: batchEndTest);
     [blurTest, sharpTest] = state.getBatch(imdb, batchTest) ;
     
-    for t = 1 : opts.batchSize : numel(subset);
+    for t = 1 : opts.batchSize : numel(subset) / 5;
     %for t=1:opts.batchSize:opts.batchSize*5
         %%% get this image batch
         disp(strcat(num2str(epoch),'+', num2str(t)));
@@ -209,7 +209,7 @@ function [deblur] = Ggenarate(net, blur)
 %     whos net;
 %     whos blur;
     res = vl_simplenn(net, blur, [], [], 'conserveMemory', true, 'mode', 'test');
-    deblur = blur - res(end).x;
+    deblur = res(end).x;
 % deblur = blur;
 end
 
@@ -268,9 +268,10 @@ function [Gnet] = trainG(Gnet, Dnet, blur, opts, state, batchSize)
     for i = 1 : numel(Dnet.layers)
         netContainer.layers{end + 1} = Dnet.layers{i};
     end
+    netContainer.layers{end}.loss = 'gloss';
 
     res = [];
-    labels = ones(numel(blur), 1);
+    labels = ones(size(blur, 4), 1);
     netContainer.layers{end}.class = labels;
 %     vl_simplenn_display(netContainer);
     if numel(opts.gpus) == 1
