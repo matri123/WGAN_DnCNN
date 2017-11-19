@@ -75,6 +75,7 @@ if ~exist(opts.expDir, 'dir'), mkdir(opts.expDir) ; end
 Gnet = vl_simplenn_tidy(Gnet);    %%% fill in some eventually missing values
 Dnet = vl_simplenn_tidy(Dnet);
 Gnet.layers{end-1}.precious = 1;
+% Dnet.layers{end-1}.precious = 1;
 % vl_simplenn_display(Gnet, 'batchSize', opts.batchSize) ;
 
 state.getBatch = getBatch ;
@@ -90,7 +91,7 @@ start = findLastCheckpoint(opts.expDir,opts.modelName) ;
 if start >= 1
     fprintf('%s: resuming by loading epoch %d', mfilename, start) ;
     load(modelPath(start), 'Gnet') ;
-    load(modelPath(start), 'Dnet') ;
+    load(DmodelPath(start), 'Dnet') ;
     % net = vl_simplenn_tidy(net) ;
 end
 
@@ -110,7 +111,6 @@ for epoch = start+1 : opts.numEpochs
     state.learningRate = opts.learningRate(min(epoch, numel(opts.learningRate)));
     state.train = opts.train(randperm(numel(opts.train))) ; %%% shuffle
     state.test  = opts.test; %%% no need to shuffle
-    disp(size(state.test));
     opts.thetaCurrent = opts.theta(min(epoch, numel(opts.theta)));
     if numel(opts.gpus) == 1
         Gnet = vl_simplenn_move(Gnet, 'gpu') ;
@@ -127,7 +127,8 @@ for epoch = start+1 : opts.numEpochs
     batchTest = subset(batchStartTest : 1: batchEndTest);
     [blurTest, sharpTest] = state.getBatch(imdb, batchTest) ;
     
-    for t = 1 : opts.batchSize : numel(subset) / 5;
+    resD = [];
+    for t = 1 : opts.batchSize : numel(subset) / 3;
     %for t=1:opts.batchSize:opts.batchSize*5
         %%% get this image batch
         disp(strcat(num2str(epoch),'+', num2str(t)));
@@ -142,17 +143,36 @@ for epoch = start+1 : opts.numEpochs
             blur = gpuArray(blur);
             sharp = gpuArray(sharp);
         end
+        
+%         dzdy = single(1);
+%         Gnet.layers{end}.class = sharp;
+%         resD = vl_simplenn(Gnet, blur, dzdy, resD, ...
+%         'mode', 'normal', ...
+%         'conserveMemory', opts.conserveMemory, ...
+%         'backPropDepth', opts.backPropDepth, ...
+%         'cudnn', opts.cudnn) ;
+% 
+%         for l = numel(Gnet.layers) : -1 : 1
+%             disp(size(res(l).dzdw));
+%             for j = 1 : numel(resD(l).dzdw)
+% %                 disp(resD(l).dzdw{j});
+%                 thisLR = state.learningRate * Gnet.layers{l}.learningRate(j);
+%     %             disp(res(l).dzdw{j});
+%                 Gnet.layers{l}.weights{j} = Gnet.layers{l}.weights{j} - thisLR * (1 / 35) * (resD(l).dzdw{j});
+%             end
+%         end
+        
+        
+        
         % 1. G genarat deblur
         deblur = Ggenarate(Gnet, blur);
 %         imshow(cat(2, im2uint8(blur(:,:,:,1)), im2uint8(deblur(:,:,:,1))));
 
         % 2. train D
-        Dnet = trainD(Dnet, sharp, deblur, opts, state, opts.batchSize);
+        [Dnet, resD] = trainD(Dnet, sharp, deblur, resD, opts, state, opts.batchSize);
 
         % 3. train G
         Gnet = trainG(Gnet, Dnet, blur, opts, state, opts.batchSize);
-%         [Gnet, state, TrainError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'train');
-%         [Gnet,  ~  ,TestError(epoch)] = G_process_epoch(Gnet, state, imdb, opts, 'test' );
     end
 
     
@@ -203,18 +223,12 @@ end
 %%%-------------------------------------------------------------------------
 function [deblur] = Ggenarate(net, blur)
 %%%-------------------------------------------------------------------------
-%     deblur = [];
-%     disp(size(blur));
-%     disp(size(blur(:,:,:,1)));
-%     whos net;
-%     whos blur;
-    res = vl_simplenn(net, blur, [], [], 'conserveMemory', true, 'mode', 'test');
-    deblur = res(end).x;
-% deblur = blur;
+    res = vl_simplenn(net, blur, [], [], 'conserveMemory', true, 'mode', 'normal');
+    deblur = blur - res(end).x;
 end
 
 %%%-------------------------------------------------------------------------
-function [Dnet] = trainD(Dnet, sharp, deblur, opts, state, batchSize)
+function [Dnet, resD] = trainD(Dnet, sharp, deblur, resD, opts, state, batchSize)
 %%%-------------------------------------------------------------------------
     inputs = [];
     labels = [];
@@ -228,34 +242,37 @@ function [Dnet] = trainD(Dnet, sharp, deblur, opts, state, batchSize)
         inputs(:,:,:,2 * i) = deblur1(:,:,:,i);
         labels(2 * i) = 0;
     end
-%     for i = 1 : size(deblur1, 4)
-%         inputs(:,:,:,size(sharp1, 4) + i) = deblur1(:,:,:,i);
-%         labels(size(sharp1, 4) + i) = 0;
-%     end
-%     randp = randperm(numel(sharp) + numel(deblur));
-%     inputs = inputs(randp);
-%     labels = labels(randp);
+
     if numel(opts.gpus) == 1
         inputs = single(inputs);
         labels = single(labels);
         inputs = gpuArray(inputs);
         labels = gpuArray(labels);
     end
-    dzdy = [];
-    res = [];
+    dzdy = single(1);
+    
+%     disp(Dnet.layers{1}.weights{1}(:,:,:,1));
+
     Dnet.layers{end}.class = labels;
-    res = vl_simplenn(Dnet, inputs, [], [], ...
+    resD = vl_simplenn(Dnet, inputs, dzdy, resD, ...
         'mode', 'normal', ...
         'conserveMemory', opts.conserveMemory, ...
         'backPropDepth', opts.backPropDepth, ...
         'cudnn', opts.cudnn) ;
-
+    
     for l = numel(Dnet.layers) : -1 : 1
-        for j = 1 : numel(res(l).dzdw)
-            thisLR = state.learningRate * net.layers{l}.learningRate(j);
-            net.layers{l}.weights{j} = net.layers{l}.weights{j} - thisLR * (1 / batchSize) * (res(l).dzdw{j});
+%         disp(size(resD(l).dzdw));
+        for j = 1 : numel(resD(l).dzdw)
+%             disp(resD(l).dzdw{j});
+%             disp(j);
+            thisLR = state.learningRate * Dnet.layers{l}.learningRate(j);
+%             disp(thisLR * (1 / batchSize) * (resD(l).dzdw{j}));
+            Dnet.layers{l}.weights{j} = Dnet.layers{l}.weights{j} - thisLR * (1 / batchSize) * (resD(l).dzdw{j});
+%             disp(Dnet.layers{l}.weights{j});
+%         pause(10);
         end
     end
+    
 end
 
 %%%-------------------------------------------------------------------------
@@ -269,7 +286,10 @@ function [Gnet] = trainG(Gnet, Dnet, blur, opts, state, batchSize)
         netContainer.layers{end + 1} = Dnet.layers{i};
     end
     netContainer.layers{end}.loss = 'gloss';
+%     disp('before');
+%     disp(Gnet.layers{1}.weights{1}(:,:,:,1));
 
+    dzdy = single(1);
     res = [];
     labels = ones(size(blur, 4), 1);
     netContainer.layers{end}.class = labels;
@@ -277,17 +297,30 @@ function [Gnet] = trainG(Gnet, Dnet, blur, opts, state, batchSize)
     if numel(opts.gpus) == 1
         netContainer = vl_simplenn_move(netContainer, 'gpu');
     end
-    res = vl_simplenn(netContainer, blur, [], res, ...
+    res = vl_simplenn(netContainer, blur, dzdy, res, ...
         'mode', 'normal', ...
         'conserveMemory', opts.conserveMemory, ...
         'backPropDepth', opts.backPropDepth, ...
         'cudnn', opts.cudnn);
     for l = numel(Gnet.layers) : -1 : 1
+%         disp(l);
+%         disp(numel(res(l).dzdw));
         for j = 1 : numel(res(l).dzdw)
-            thisLR = state.learningRate * net.layers{l}.learningRate(j);
-            net.layers{l}.weights{j} = net.layers{l}.weights{j} - thisLR * (1 / batchSize) * (res(l).dzdw{j});
+%             disp(res(l).dzdw{j});
+            thisLR = state.learningRate * netContainer.layers{l}.learningRate(j);
+%             disp(thisLR * (1 / batchSize) * (res(l).dzdw{j}));
+%             disp(netContainer.layers{l}.weights{j}(:,:,:,1));
+            netContainer.layers{l}.weights{j} = netContainer.layers{l}.weights{j} - thisLR * (1 / batchSize) * (res(l).dzdw{j});
+%             disp(netContainer.layers{l}.weights{j}(:,:,:,1));
+%             pause(10);
         end
     end
+%     disp('Con');
+%     disp(netContainer.layers{1}.weights{1}(:,:,:,1));
+%     disp('after');
+%     disp(Gnet.layers{1}.weights{1}(:,:,:,1));
+%     pause(2);
+    
     for i = 1 : numel(Gnet.layers)
         Gnet.layers{i} = netContainer.layers{i};
     end
